@@ -3,8 +3,8 @@
 Öffentliche, mobil-optimierte Pokerstatistik für deine Runde.
 **Kostenlos gehostet** (nur die Domain kostet), Daten liegen sicher in **Google Sheets**.
 
-- **Öffentliche Seite** (`index.html`): Ranglisten (aktuelles Jahr + ewige Tabelle), Verlaufskurven, Rekorde, Hall of Fame, Form & Quoten, Teilnahme, Locations und ~15 „Auszeichnungen".
-- **Admin-Seite** (`admin.html`): Abend eintragen mit einfachem Passwort. Rechnet live (Buy-Ins + End-Chips → Ergebnis) und prüft die Bilanz.
+- **Öffentliche Seite** (`index.html`): Ranglisten (aktuelles Jahr + ewige Tabelle), Verlaufskurven, Rekorde, Hall of Fame, Form & Quoten, Teilnahme, Locations, ~15 „Auszeichnungen" – **und pro Abend eine Detailansicht** (wann, wo, wer, Ergebnis + Verlaufs-Log). Für **alle** einsehbar.
+- **Admin-Seite** (`admin.html`, passwortgeschützt): Übersicht aller Abende, **Live-Modus** (Abend starten, Rebuys mit Uhrzeit loggen, abschließen), Abend **bearbeiten/löschen** und klassisch **manuell eintragen**. Rechnet live und prüft die Bilanz.
 - **Backend** (`apps-script/Code.gs`): Google Apps Script. Das Google Sheet ist Datenbank **und** Backup in einem.
 
 ---
@@ -35,7 +35,8 @@ Kurz: **Die Zahlen kommen aus dem Sheet und aktualisieren sich von allein.** Git
 4. **Passwort setzen:** Links auf das Zahnrad **Projekteinstellungen → Skripteigenschaften → Eigenschaft hinzufügen**:
    - Name: `ADMIN_PASSWORD`
    - Wert: *dein Wunschpasswort*
-5. Oben die Funktion **`setup`** auswählen und **Ausführen**. Beim ersten Mal Google-Berechtigungen erlauben (dein eigenes Konto). → Legt die Tabs `Games`, `Results`, `LegacyTotals`, `Champions`, `Players`, `Meta` an.
+5. Oben die Funktion **`setup`** auswählen und **Ausführen**. Beim ersten Mal Google-Berechtigungen erlauben (dein eigenes Konto). → Legt die Tabs `Games`, `Results`, `Log`, `LegacyTotals`, `Champions`, `Players`, `Meta` an.
+   > **Schon ein bestehendes Sheet in Betrieb?** Dann einfach `setup` erneut ausführen – das ist **nicht-destruktiv**: es legt nur den fehlenden Tab `Log` an und ergänzt in `Games` die neuen Spalten `status`, `startedAt`, `endedAt`. Vorhandene Daten bleiben unangetastet. (Die Live-Aktionen legen fehlende Struktur bei Bedarf auch selbst an.)
 6. Funktion **`migrate`** auswählen und **Ausführen**. → Holt die Historie aus dem alten Sheet:
    - Jahres-Summen 2018–2025 + Stammspieler-Markierung aus dem Tab `alltime`
    - Rekord-/Sieger-Block (Hall of Fame)
@@ -82,23 +83,34 @@ git push -u origin main
 
 ---
 
-## Täglicher Gebrauch – Abend eintragen
+## Täglicher Gebrauch
 
-1. `…/admin.html` am Handy öffnen.
-2. **Passwort** eingeben (wird lokal am Gerät gemerkt).
-3. **Datum**, **Gastgeber/Ort**, ggf. Buy-In/Chips anpassen (Standard 5 € / 10.000 Chips).
-4. Pro Spieler **Buy-Ins** und **End-Chips** eintragen. Das **Ergebnis** wird live berechnet:
-   `Ergebnis = End-Chips × (Buy-In ÷ Chips pro Buy-In) − Buy-Ins × Buy-In`
-5. Die **Bilanz-Leiste** zeigt „✓ Bilanz stimmt", wenn die Summe der End-Chips zur Anzahl Buy-Ins passt (Nullsummenspiel). Weicht sie ab → End-Chips prüfen.
-6. **Speichern** → landet im Sheet, Statistik ist sofort aktuell.
+`…/admin.html` am Handy öffnen, **Passwort** eingeben (wird lokal am Gerät gemerkt). Die Übersicht listet alle Abende. Von dort:
 
-Spieler nicht in der Liste? Unten per „+ Hinzufügen" ergänzen.
+### Variante 1 – Live-Modus (empfohlen, während des Abends)
+
+1. **▶ Live-Abend starten** → Datum, Gastgeber/Ort, Buy-In/Chips (Standard 5 € / 10.000) und die **Startspieler** wählen (Stammspieler sind vorbelegt). → **Abend jetzt starten** (Startzeit wird geloggt).
+2. Während des Spiels: pro Spieler **+ Rebuy** tippen → jede Runde wird mit **Uhrzeit** ins Log geschrieben. Wer später dazukommt, unten per „+ Buy-In" ergänzen. Vertippt? **↶** nimmt das letzte (Re)Buy zurück.
+3. Am Ende **✅ Abend abschließen** → die **Buy-Ins sind aus dem Log vorbefüllt**, nur noch die **End-Chips** je Spieler eintragen. Bilanz-Leiste prüft die Nullsumme. → **Speichern**.
+
+Der laufende Abend ist sofort öffentlich als „🔴 live" sichtbar (fließt aber erst nach dem Abschließen in die Wertung ein).
+
+### Variante 2 – Manuell in einem Rutsch (Abend nachtragen)
+
+**✍️ Abend manuell eintragen** → Datum/Ort, dann pro Spieler **Buy-Ins** und **End-Chips**. Ergebnis wird live berechnet:
+`Ergebnis = End-Chips × (Buy-In ÷ Chips pro Buy-In) − Buy-Ins × Buy-In`. Speichern → sofort in der Statistik.
+
+### Bearbeiten / Löschen
+
+In der Übersicht auf **✏️** (bearbeiten) bzw. **🗑** (löschen). Öffentlich führt in jeder Abend-Detailansicht der Button **„Bearbeiten (Admin)"** zum selben Formular – ändern kann aber nur, wer das Passwort hat.
+
+Spieler nicht in der Liste? Überall per „+ Hinzufügen" ergänzen.
 
 ---
 
 ## Gut zu wissen
 
-- **Backup:** Alle Daten stehen jederzeit im Google Sheet (Tabs `Games`, `Results`). Du kannst dort auch manuell korrigieren.
+- **Backup:** Alle Daten stehen jederzeit im Google Sheet (Tabs `Games`, `Results`, `Log`). Du kannst dort auch manuell korrigieren.
 - **Passwort ändern:** In den Apps-Script-Skripteigenschaften `ADMIN_PASSWORD` anpassen. Nichts neu bereitstellen nötig.
 - **Sicherheit:** Das Passwort steht **nur** im Apps Script (nicht im öffentlichen Code). Die öffentliche Seite kann nur **lesen**; Schreiben geht nur mit Passwort. „Da geht's um nix" – für ein Spaßprojekt völlig ausreichend.
 - **Jahres-Historie vor 2022:** Wird aus dem alten Sheet als **Jahres-Summe** übernommen (dort gab es früher Zählfehler; die Summen sind die veröffentlichten Werte). Ab 2023 sind die einzelnen Abende erfasst → Verlaufskurven & Rekorde.
@@ -119,8 +131,8 @@ assets/
   config.js           ← HIER die Apps-Script-URL eintragen
   style.css           Design (mobile-first)
   stats.js            Statistik-Engine + Daten-Loader
-  app.js              Rendering der öffentlichen Seite
-  admin.js            Eingabe-Formular
+  app.js              Rendering öffentliche Seite + Abend-Detailansicht (#game/<id>)
+  admin.js            Admin-Router: Übersicht, Live-Modus, Bearbeiten, manuell
   sample-data.js      Beispieldaten (nur Vorschau ohne Backend)
 apps-script/
   Code.gs             Backend: API + Migration

@@ -17,17 +17,23 @@
 
   function compute(data) {
     var currentYear = num(data.currentYear);
-    var games = (data.games || []).map(function (g) {
+    var allGames = (data.games || []).map(function (g) {
       return {
         id: g.id, date: String(g.date || ''), year: num(g.year),
         location: String(g.location || '').trim(),
         buyin: num(g.buyin), chips: num(g.chips), pot: num(g.pot),
-        note: g.note || ''
+        note: g.note || '',
+        status: String(g.status || 'done').trim().toLowerCase() || 'done',
+        startedAt: g.startedAt || '', endedAt: g.endedAt || ''
       };
     }).sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
 
+    // Live-Abende (noch nicht abgeschlossen) fließen NICHT in Wertungen ein.
+    var games = allGames.filter(function (g) { return g.status !== 'live'; });
+    var liveGames = allGames.filter(function (g) { return g.status === 'live'; });
+
     var gameById = {};
-    games.forEach(function (g) { gameById[g.id] = g; });
+    allGames.forEach(function (g) { gameById[g.id] = g; });
 
     // Ergebnisse anreichern (mit Jahr/Datum des Spiels)
     var results = (data.results || []).map(function (r) {
@@ -40,6 +46,20 @@
         year: g.year || 0, date: g.date || '', location: g.location || ''
       };
     }).filter(function (r) { return r.player; });
+
+    // ---- Log-Einträge je Abend ---------------------------------------------
+    var logByGame = {};
+    (data.log || []).forEach(function (e) {
+      var gid = e.gameId;
+      if (!gid) return;
+      (logByGame[gid] = logByGame[gid] || []).push({
+        ts: String(e.ts || ''), type: String(e.type || '').trim(),
+        player: String(e.player || '').trim(), info: String(e.info || '')
+      });
+    });
+    Object.keys(logByGame).forEach(function (gid) {
+      logByGame[gid].sort(function (a, b) { return a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0; });
+    });
 
     var legacy = (data.legacyTotals || []).map(function (l) {
       return { player: String(l.player || '').trim(), year: num(l.year), total: num(l.total) };
@@ -336,6 +356,63 @@
       return arr[0];
     }
 
+    // ---- Abend-Detail & Abend-Liste ----------------------------------------
+    var resultsByGame = {};
+    results.forEach(function (r) { (resultsByGame[r.gameId] = resultsByGame[r.gameId] || []).push(r); });
+
+    function buyinCounts(id) {
+      var out = {};
+      (logByGame[id] || []).forEach(function (e) {
+        if (e.type !== 'buyin' && e.type !== 'rebuy') return;
+        if (e.player) out[e.player] = (out[e.player] || 0) + 1;
+      });
+      return out;
+    }
+
+    function gameDetail(id) {
+      var g = gameById[id];
+      if (!g) return null;
+      var log = logByGame[id] || [];
+      var counts = buyinCounts(id);
+      var rs = (resultsByGame[id] || []).slice().sort(function (a, b) { return b.result - a.result; });
+      var playerNames;
+      if (rs.length) {
+        playerNames = rs.map(function (r) { return r.player; });
+      } else {
+        // Live-Abend: Teilnehmer aus dem Log
+        var seen = {};
+        log.forEach(function (e) { if ((e.type === 'buyin' || e.type === 'rebuy') && e.player) seen[e.player] = true; });
+        playerNames = Object.keys(seen);
+      }
+      var pot = g.pot || 0;
+      if (!pot) { // aus Buy-Ins schätzen (v.a. für Live-Abende)
+        var tb = 0; Object.keys(counts).forEach(function (p) { tb += counts[p]; });
+        pot = round2(tb * g.buyin);
+      }
+      return {
+        game: g, results: rs, log: log, buyinCounts: counts,
+        players: playerNames, pot: round2(pot),
+        rebuys: log.filter(function (e) { return e.type === 'rebuy'; }).length
+      };
+    }
+
+    function gamesList() {
+      return allGames.slice().sort(function (a, b) { return a.date < b.date ? 1 : a.date > b.date ? -1 : 0; })
+        .map(function (g) {
+          var rs = resultsByGame[g.id] || [];
+          var counts = buyinCounts(g.id);
+          var np = rs.length || Object.keys(counts).length;
+          var top = null;
+          rs.forEach(function (r) { if (!top || r.result > top.result) top = r; });
+          return {
+            id: g.id, date: g.date, year: g.year, location: g.location,
+            status: g.status, players: np, pot: g.pot || 0,
+            top: top ? { player: top.player, result: top.result } : null,
+            rebuys: (logByGame[g.id] || []).filter(function (e) { return e.type === 'rebuy'; }).length
+          };
+        });
+    }
+
     // ---- Kennzahlen für den Kopf -------------------------------------------
     var summary = {
       currentYear: currentYear,
@@ -357,7 +434,8 @@
       champions: champions, championsByYear: championsByYear, mostTitles: mostTitles,
       records: records, participation: participation, locations: locationList,
       awards: awards,
-      playerDetail: playerDetail, nights: nights, allPlayers: Object.keys(allPlayers).sort()
+      playerDetail: playerDetail, nights: nights, allPlayers: Object.keys(allPlayers).sort(),
+      gameDetail: gameDetail, gamesList: gamesList, liveGames: liveGames
     };
   }
 
@@ -376,6 +454,25 @@
     var m = String(iso).match(/(\d{4})-(\d{2})-(\d{2})/);
     if (!m) return iso;
     return Number(m[3]) + '.' + Number(m[2]) + '.' + m[1];
+  }
+  // ISO-Zeitstempel -> "HH:MM" in lokaler Zeit
+  function fmtTime(iso) {
+    if (!iso) return '';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) {
+      var m = String(iso).match(/(\d{2}):(\d{2})/);
+      return m ? m[1] + ':' + m[2] : '';
+    }
+    return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+  }
+  // Dauer zwischen zwei ISO-Zeiten -> "3 h 20 min"
+  function fmtDuration(fromIso, toIso) {
+    var a = new Date(fromIso), b = new Date(toIso || Date.now());
+    var ms = b.getTime() - a.getTime();
+    if (!isFinite(ms) || ms < 0) return '';
+    var min = Math.round(ms / 60000), h = Math.floor(min / 60);
+    min = min % 60;
+    return (h ? h + ' h ' : '') + min + ' min';
   }
 
   // ---- Daten laden: fetch, bei CORS-Problemen JSONP-Fallback --------------
@@ -404,5 +501,6 @@
     }
   }
 
-  global.MPA = { compute: compute, eur: eur, shortDate: shortDate, fmtDate: fmtDate, loadData: loadData };
+  global.MPA = { compute: compute, eur: eur, shortDate: shortDate, fmtDate: fmtDate,
+                 fmtTime: fmtTime, fmtDuration: fmtDuration, loadData: loadData };
 })(window);

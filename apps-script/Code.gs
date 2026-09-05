@@ -33,6 +33,12 @@ var T_LEGACY  = 'LegacyTotals';   // eingefrorene Jahres-Summen (2018–2025)
 var T_CHAMPS  = 'Champions';      // Rekord-Block pro Jahr (Hall of Fame)
 var T_PLAYERS = 'Players';        // Spieler-Meta (freq-Flag etc.)
 var T_META    = 'Meta';           // Key/Value-Einstellungen
+var T_LOG     = 'Log';            // Abend-Verlauf (Start / Buy-Ins / Rebuys / Ende)
+
+// Spalten-Header der wichtigsten Tabs (zentral, damit setup/ensure konsistent bleiben)
+var H_GAMES   = ['id','date','year','location','buyin','chips','pot','note','createdAt','status','startedAt','endedAt'];
+var H_RESULTS = ['gameId','player','buyIns','finalChips','payout','result'];
+var H_LOG     = ['gameId','ts','type','player','info'];
 
 // ==== Web-API ===============================================================
 
@@ -51,7 +57,12 @@ function doPost(e) {
     }
     switch (body.action) {
       case 'addGame':    res = addGame_(body); break;
+      case 'editGame':   res = editGame_(body); break;
       case 'deleteGame': res = deleteGame_(body); break;
+      case 'startGame':  res = startGame_(body); break;   // Live: Abend starten
+      case 'logBuy':     res = logBuy_(body); break;      // Live: Buy-In / Rebuy loggen
+      case 'undoBuy':    res = undoBuy_(body); break;      // Live: letztes (Re)Buy zurücknehmen
+      case 'finishGame': res = finishGame_(body); break;  // Live: Abend abschließen
       case 'closeYear':  res = closeYear_(body); break;
       default: res.error = 'Unbekannte Aktion: ' + body.action;
     }
@@ -82,17 +93,25 @@ function checkPassword_(pw) {
 function getAllData_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var meta = readMeta_(ss);
+  var tz = ss.getSpreadsheetTimeZone();
+  // Games: date-Feld immer als reines "YYYY-MM-DD" ausliefern (kein Date-Objekt,
+  // keine Zeitzonen-Verschiebung um einen Tag). startedAt/endedAt bleiben Zeitstempel.
+  var games = readTable_(ss, T_GAMES).map(function (g) {
+    g.date = toDateStr_(g.date, tz);
+    return g;
+  });
   return {
     ok: true,
     updated: new Date().toISOString(),
     currentYear: Number(meta.currentYear || CURRENT_YEAR_DEFAULT),
     defaultBuyin: Number(meta.defaultBuyin || DEFAULT_BUYIN),
     defaultChips: Number(meta.defaultChips || DEFAULT_CHIPS),
-    games:        readTable_(ss, T_GAMES),
+    games:        games,
     results:      readTable_(ss, T_RESULTS),
     legacyTotals: readTable_(ss, T_LEGACY),
     champions:    readTable_(ss, T_CHAMPS),
-    players:      readTable_(ss, T_PLAYERS)
+    players:      readTable_(ss, T_PLAYERS),
+    log:          readTable_(ss, T_LOG)
   };
 }
 
@@ -125,6 +144,7 @@ function readMeta_(ss) {
 
 function addGame_(body) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
+  ensureStructure_(ss);
   var g = body.game || {};
   var results = body.results || [];
   if (!g.date) return { ok: false, error: 'Datum fehlt.' };
@@ -132,9 +152,166 @@ function addGame_(body) {
 
   var buyin = Number(g.buyin || DEFAULT_BUYIN);
   var chips = Number(g.chips || DEFAULT_CHIPS);
-  var chipValue = buyin / chips;
+  var calc = computeResults_(results, buyin, chips);
+  var id = 'G' + new Date().getTime();
+  var year = yearOf_(g.date);
 
-  // Ergebnisse serverseitig nachrechnen (Quelle der Wahrheit)
+  appendGameRow_(ss, {
+    id: id, date: g.date, year: year, location: g.location || '',
+    buyin: buyin, chips: chips, pot: round2_(calc.totalPot), note: g.note || '',
+    status: 'done', startedAt: '', endedAt: ''
+  });
+  writeResults_(ss, id, calc.clean);
+
+  return { ok: true, id: id, balance: round2_(calc.balance), saved: calc.clean.length };
+}
+
+/** Bestehenden Abend bearbeiten (Meta + Ergebnisse neu berechnen). */
+function editGame_(body) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  ensureStructure_(ss);
+  var id = body.id;
+  var g = body.game || {};
+  var results = body.results || [];
+  if (!id) return { ok: false, error: 'Keine Spiel-ID.' };
+  var row = gameRowIndex_(ss, id);
+  if (row < 0) return { ok: false, error: 'Abend nicht gefunden.' };
+  if (!results.length) return { ok: false, error: 'Keine Spieler-Ergebnisse.' };
+
+  var buyin = Number(g.buyin || DEFAULT_BUYIN);
+  var chips = Number(g.chips || DEFAULT_CHIPS);
+  var calc = computeResults_(results, buyin, chips);
+  var year = yearOf_(g.date);
+
+  // Games-Zeile aktualisieren (Log/Status/Zeiten bleiben erhalten)
+  setGameFields_(ss, id, {
+    date: g.date, year: year, location: g.location || '',
+    buyin: buyin, chips: chips, pot: round2_(calc.totalPot), note: g.note || ''
+  });
+  // Ergebnisse ersetzen
+  removeRowsById_(ss.getSheetByName(T_RESULTS), 0, id);
+  writeResults_(ss, id, calc.clean);
+
+  return { ok: true, id: id, balance: round2_(calc.balance), saved: calc.clean.length };
+}
+
+function deleteGame_(body) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var id = body.id;
+  if (!id) return { ok: false, error: 'Keine Spiel-ID.' };
+  removeRowsById_(ss.getSheetByName(T_GAMES), 0, id);
+  removeRowsById_(ss.getSheetByName(T_RESULTS), 0, id);
+  removeRowsById_(ss.getSheetByName(T_LOG), 0, id);
+  return { ok: true, deleted: id };
+}
+
+// ==== Live-Abend: starten / (re)buy loggen / abschließen =====================
+
+/** Startet einen Live-Abend, loggt Start + je Startspieler einen Buy-In. */
+function startGame_(body) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  ensureStructure_(ss);
+  var g = body.game || {};
+  var players = (body.players || []).map(function (p) { return String(p || '').trim(); })
+    .filter(Boolean);
+  if (!g.date) return { ok: false, error: 'Datum fehlt.' };
+  if (!players.length) return { ok: false, error: 'Keine Startspieler.' };
+
+  var buyin = Number(g.buyin || DEFAULT_BUYIN);
+  var chips = Number(g.chips || DEFAULT_CHIPS);
+  var id = 'G' + new Date().getTime();
+  var year = yearOf_(g.date);
+  var now = new Date();
+
+  appendGameRow_(ss, {
+    id: id, date: g.date, year: year, location: g.location || '',
+    buyin: buyin, chips: chips, pot: '', note: g.note || '',
+    status: 'live', startedAt: now, endedAt: ''
+  });
+
+  appendLog_(ss, id, now, 'start', '', 'Abend gestartet');
+  players.forEach(function (p) { appendLog_(ss, id, now, 'buyin', p, ''); });
+
+  return { ok: true, id: id, startedAt: now.toISOString(), log: logForGame_(ss, id) };
+}
+
+/** Loggt einen Buy-In (Typ 'rebuy' Standard, 'buyin' für spät dazugekommene). */
+function logBuy_(body) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var id = body.id;
+  var player = String(body.player || '').trim();
+  var type = body.type === 'buyin' ? 'buyin' : 'rebuy';
+  if (!id) return { ok: false, error: 'Keine Spiel-ID.' };
+  if (!player) return { ok: false, error: 'Kein Spieler.' };
+  if (gameRowIndex_(ss, id) < 0) return { ok: false, error: 'Abend nicht gefunden.' };
+  appendLog_(ss, id, new Date(), type, player, '');
+  return { ok: true, id: id, log: logForGame_(ss, id) };
+}
+
+/** Nimmt den letzten Buy-In/Rebuy eines Spielers wieder zurück. */
+function undoBuy_(body) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var id = body.id;
+  var player = String(body.player || '').trim();
+  if (!id) return { ok: false, error: 'Keine Spiel-ID.' };
+  var sh = ss.getSheetByName(T_LOG);
+  var v = sh.getDataRange().getValues(); // [gameId,ts,type,player,info]
+  for (var i = v.length - 1; i >= 1; i--) {
+    if (String(v[i][0]) !== String(id)) continue;
+    if (player && String(v[i][3]).trim() !== player) continue;
+    if (v[i][2] === 'rebuy' || v[i][2] === 'buyin') { sh.deleteRow(i + 1); break; }
+  }
+  return { ok: true, id: id, log: logForGame_(ss, id) };
+}
+
+/** Schließt einen Live-Abend ab: End-Chips eintragen, Ergebnisse berechnen. */
+function finishGame_(body) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  ensureStructure_(ss);
+  var id = body.id;
+  var results = body.results || [];
+  if (!id) return { ok: false, error: 'Keine Spiel-ID.' };
+  var row = gameRowIndex_(ss, id);
+  if (row < 0) return { ok: false, error: 'Abend nicht gefunden.' };
+  if (!results.length) return { ok: false, error: 'Keine Ergebnisse.' };
+
+  var meta = gameMeta_(ss, id);
+  var buyin = Number((body.game && body.game.buyin) || meta.buyin || DEFAULT_BUYIN);
+  var chips = Number((body.game && body.game.chips) || meta.chips || DEFAULT_CHIPS);
+  var counts = countBuyins_(ss, id); // player -> Anzahl Buy-Ins aus dem Log
+
+  // Buy-Ins aus dem Log ergänzen, wenn nicht explizit übergeben
+  var enriched = results.map(function (r) {
+    var name = String(r.player || '').trim();
+    var b = (r.buyIns === '' || r.buyIns == null) ? (counts[name] || 1) : Number(r.buyIns);
+    return { player: name, buyIns: b, finalChips: Number(r.finalChips || 0) };
+  });
+  var calc = computeResults_(enriched, buyin, chips);
+  var now = new Date();
+
+  removeRowsById_(ss.getSheetByName(T_RESULTS), 0, id);
+  writeResults_(ss, id, calc.clean);
+  setGameFields_(ss, id, {
+    buyin: buyin, chips: chips, pot: round2_(calc.totalPot),
+    status: 'done', endedAt: now
+  });
+  if (body.game) {
+    var upd = {};
+    if (body.game.date)     { upd.date = body.game.date; upd.year = yearOf_(body.game.date); }
+    if (body.game.location != null) upd.location = body.game.location;
+    if (body.game.note != null)     upd.note = body.game.note;
+    if (Object.keys(upd).length) setGameFields_(ss, id, upd);
+  }
+  appendLog_(ss, id, now, 'end', '', 'Abend beendet');
+
+  return { ok: true, id: id, balance: round2_(calc.balance), saved: calc.clean.length };
+}
+
+// ==== gemeinsame Schreib-/Rechen-Helfer =====================================
+
+/** Ergebnisse serverseitig nachrechnen (Quelle der Wahrheit). */
+function computeResults_(results, buyin, chips) {
+  var chipValue = chips ? buyin / chips : 0;
   var totalPot = 0, totalPayout = 0, clean = [];
   results.forEach(function (r) {
     var name = String(r.player || '').trim();
@@ -148,33 +325,105 @@ function addGame_(body) {
     clean.push({ player: name, buyIns: buyIns, finalChips: finalChips,
                  payout: round2_(payout), result: round2_(result) });
   });
-
-  var year = yearOf_(g.date);
-  var id = 'G' + new Date().getTime();
-
-  var gGames = ss.getSheetByName(T_GAMES);
-  gGames.appendRow([id, g.date, year, g.location || '', buyin, chips,
-                    round2_(totalPot), g.note || '', new Date()]);
-
-  var gRes = ss.getSheetByName(T_RESULTS);
-  clean.forEach(function (r) {
-    gRes.appendRow([id, r.player, r.buyIns, r.finalChips, r.payout, r.result]);
-  });
-
-  return {
-    ok: true, id: id,
-    balance: round2_(totalPayout - totalPot), // sollte ~0 sein
-    saved: clean.length
-  };
+  return { clean: clean, totalPot: totalPot, totalPayout: totalPayout,
+           balance: totalPayout - totalPot };
 }
 
-function deleteGame_(body) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var id = body.id;
-  if (!id) return { ok: false, error: 'Keine Spiel-ID.' };
-  removeRowsById_(ss.getSheetByName(T_GAMES), 0, id);
-  removeRowsById_(ss.getSheetByName(T_RESULTS), 0, id);
-  return { ok: true, deleted: id };
+function appendGameRow_(ss, g) {
+  var sh = ss.getSheetByName(T_GAMES);
+  var head = headerOf_(sh, H_GAMES);
+  var rowObj = {
+    id: g.id, date: g.date, year: g.year, location: g.location,
+    buyin: g.buyin, chips: g.chips, pot: g.pot, note: g.note,
+    createdAt: new Date(), status: g.status || 'done',
+    startedAt: g.startedAt || '', endedAt: g.endedAt || ''
+  };
+  sh.appendRow(head.map(function (h) { return rowObj[h] != null ? rowObj[h] : ''; }));
+}
+
+function writeResults_(ss, id, clean) {
+  var sh = ss.getSheetByName(T_RESULTS);
+  clean.forEach(function (r) {
+    sh.appendRow([id, r.player, r.buyIns, r.finalChips, r.payout, r.result]);
+  });
+}
+
+function appendLog_(ss, id, ts, type, player, info) {
+  var sh = ss.getSheetByName(T_LOG) || ensureSheet_(ss, T_LOG, H_LOG);
+  sh.appendRow([id, ts, type, player || '', info || '']);
+}
+
+function logForGame_(ss, id) {
+  var sh = ss.getSheetByName(T_LOG);
+  if (!sh) return [];
+  var v = sh.getDataRange().getValues();
+  var out = [];
+  for (var i = 1; i < v.length; i++) {
+    if (String(v[i][0]) !== String(id)) continue;
+    var ts = v[i][1];
+    out.push({ gameId: v[i][0], ts: ts instanceof Date ? ts.toISOString() : String(ts),
+               type: v[i][2], player: v[i][3], info: v[i][4] });
+  }
+  return out;
+}
+
+/** player -> Anzahl Buy-Ins (buyin + rebuy) aus dem Log. */
+function countBuyins_(ss, id) {
+  var sh = ss.getSheetByName(T_LOG);
+  var out = {};
+  if (!sh) return out;
+  var v = sh.getDataRange().getValues();
+  for (var i = 1; i < v.length; i++) {
+    if (String(v[i][0]) !== String(id)) continue;
+    if (v[i][2] !== 'buyin' && v[i][2] !== 'rebuy') continue;
+    var p = String(v[i][3]).trim();
+    if (p) out[p] = (out[p] || 0) + 1;
+  }
+  return out;
+}
+
+function gameRowIndex_(ss, id) {
+  var sh = ss.getSheetByName(T_GAMES);
+  if (!sh) return -1;
+  var v = sh.getDataRange().getValues();
+  for (var i = 1; i < v.length; i++) if (String(v[i][0]) === String(id)) return i; // 0-basiert (Zeile i+1)
+  return -1;
+}
+
+function gameMeta_(ss, id) {
+  var sh = ss.getSheetByName(T_GAMES);
+  var v = sh.getDataRange().getValues();
+  var head = v[0].map(function (h) { return String(h).trim(); });
+  for (var i = 1; i < v.length; i++) {
+    if (String(v[i][0]) !== String(id)) continue;
+    var o = {};
+    for (var c = 0; c < head.length; c++) o[head[c]] = v[i][c];
+    return o;
+  }
+  return {};
+}
+
+/** Setzt einzelne Felder einer Games-Zeile anhand der Header-Namen. */
+function setGameFields_(ss, id, fields) {
+  var sh = ss.getSheetByName(T_GAMES);
+  var v = sh.getDataRange().getValues();
+  var head = v[0].map(function (h) { return String(h).trim(); });
+  for (var i = 1; i < v.length; i++) {
+    if (String(v[i][0]) !== String(id)) continue;
+    Object.keys(fields).forEach(function (k) {
+      var c = head.indexOf(k);
+      if (c >= 0) sh.getRange(i + 1, c + 1).setValue(fields[k]);
+    });
+    return true;
+  }
+  return false;
+}
+
+/** Header-Zeile eines Sheets lesen; leeres Sheet mit Default-Header initialisieren. */
+function headerOf_(sh, def) {
+  if (sh.getLastRow() === 0) { sh.appendRow(def); return def.slice(); }
+  return sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0]
+    .map(function (h) { return String(h).trim(); });
 }
 
 function removeRowsById_(sh, col, id) {
@@ -185,15 +434,37 @@ function removeRowsById_(sh, col, id) {
   }
 }
 
+/** Stellt sicher, dass Log-Tab existiert und Games die neuen Spalten hat. */
+function ensureStructure_(ss) {
+  ensureSheet_(ss, T_LOG, H_LOG);
+  ensureColumns_(ss.getSheetByName(T_GAMES), H_GAMES);
+}
+
+/** Fehlende Spalten (nach Header-Name) rechts anhängen – nicht-destruktiv. */
+function ensureColumns_(sh, required) {
+  if (!sh) return;
+  if (sh.getLastRow() === 0) { sh.appendRow(required); return; }
+  var head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0]
+    .map(function (h) { return String(h).trim(); });
+  required.forEach(function (h) {
+    if (head.indexOf(h) < 0) {
+      sh.getRange(1, sh.getLastColumn() + 1).setValue(h);
+      head.push(h);
+    }
+  });
+}
+
 // ==== Struktur anlegen ======================================================
 
 function setup() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  ensureSheet_(ss, T_GAMES,   ['id','date','year','location','buyin','chips','pot','note','createdAt']);
-  ensureSheet_(ss, T_RESULTS, ['gameId','player','buyIns','finalChips','payout','result']);
+  ensureSheet_(ss, T_GAMES,   H_GAMES);
+  ensureSheet_(ss, T_RESULTS, H_RESULTS);
+  ensureSheet_(ss, T_LOG,     H_LOG);
   ensureSheet_(ss, T_LEGACY,  ['player','year','total']);
   ensureSheet_(ss, T_CHAMPS,  ['year','category','player','amount']);
   ensureSheet_(ss, T_PLAYERS, ['player','freq','firstYear','emoji']);
+  ensureColumns_(ss.getSheetByName(T_GAMES), H_GAMES); // bestehende Sheets nachrüsten
   var meta = ensureSheet_(ss, T_META, ['key','value']);
   if (meta.getLastRow() < 2) {
     meta.getRange(2,1,3,2).setValues([
@@ -281,8 +552,8 @@ function migrate() {
   // ---- 3) Schreiben ---------------------------------------------------------
   writeAll_(ss, T_LEGACY,  ['player','year','total'], legacy);
   writeAll_(ss, T_CHAMPS,  ['year','category','player','amount'], champs);
-  writeAll_(ss, T_GAMES,   ['id','date','year','location','buyin','chips','pot','note','createdAt'], games);
-  writeAll_(ss, T_RESULTS, ['gameId','player','buyIns','finalChips','payout','result'], results);
+  writeAll_(ss, T_GAMES,   H_GAMES, games);
+  writeAll_(ss, T_RESULTS, H_RESULTS, results);
 
   var pmRows = Object.keys(playerMeta).map(function (n) {
     return [n, playerMeta[n].freq, '', ''];
@@ -307,12 +578,14 @@ function parseYearSheet_(sh, year, games, results) {
   if (hRow < 0) return;
   var startCol = v[hRow].map(String).indexOf('Start');
   var dateStart = startCol + 1;
-  // Datums-Spalten (zusammenhängend ab dateStart, solange Kopf nicht leer)
+  // Datums-Spalten (zusammenhängend ab dateStart, solange Kopf nicht leer).
+  // raw = Original-Zellwert (oft ein echtes Date-Objekt), label = Text-Fallback.
   var dates = [];
   for (var c = dateStart; c < v[hRow].length; c++) {
-    var d = String(v[hRow][c]).trim();
+    var raw = v[hRow][c];
+    var d = String(raw).trim();
     if (d === '') break;
-    dates.push({ col: c, label: d });
+    dates.push({ col: c, raw: raw, label: d });
   }
   // Location-Zeile suchen (oberhalb der Kopfzeile: Zelle == "Location")
   var locRow = -1;
@@ -323,8 +596,9 @@ function parseYearSheet_(sh, year, games, results) {
   var gameId = {};
   dates.forEach(function (dc) {
     var loc = locRow >= 0 ? String(v[locRow][dc.col] || '').trim() : '';
-    var id = 'H' + year + '_' + normDate_(dc.label);
-    gameId[dc.col] = { id: id, date: fullDate_(dc.label, year), location: loc };
+    var iso = fullDate_(dc.raw, year);
+    var id = 'H' + year + '_' + iso.replace(/-/g, '');
+    gameId[dc.col] = { id: id, date: iso, location: loc };
   });
   // Spieler-Zeilen: ab hRow+1, solange Spalte0 Zahl (Rank) und Spalte1 Name
   for (var dr = hRow + 1; dr < v.length; dr++) {
@@ -471,8 +745,11 @@ function yearOf_(dateStr) {
   return new Date(dateStr).getFullYear() || CURRENT_YEAR_DEFAULT;
 }
 
-/** "6.1." + 2026 -> "2026-01-06" (ISO). Deutsche d.m.-Labels. */
+/** Datums-Kopf -> "2026-01-06" (ISO). Akzeptiert echte Date-Zellen ODER d.m.-Texte. */
 function fullDate_(label, year) {
+  if (label instanceof Date && !isNaN(label.getTime())) {
+    return Utilities.formatDate(label, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
   var m = String(label).match(/(\d{1,2})\.(\d{1,2})\.?(\d{2,4})?/);
   if (!m) return year + '-01-01';
   var d = ('0' + m[1]).slice(-2);
@@ -481,7 +758,12 @@ function fullDate_(label, year) {
   return y + '-' + mo + '-' + d;
 }
 
-function normDate_(label) {
-  var m = String(label).match(/(\d{1,2})\.(\d{1,2})/);
-  return m ? (('0'+m[1]).slice(-2) + ('0'+m[2]).slice(-2)) : label.replace(/\W/g, '');
+/** Zellwert (Date oder ISO/String) -> reines "YYYY-MM-DD" in der Sheet-Zeitzone. */
+function toDateStr_(v, tz) {
+  if (v instanceof Date && !isNaN(v.getTime())) {
+    return Utilities.formatDate(v, tz || Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+  var s = String(v == null ? '' : v);
+  var m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? m[1] + '-' + m[2] + '-' + m[3] : s;
 }

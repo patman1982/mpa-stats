@@ -69,7 +69,8 @@ window.MPA_SAMPLE = (function () {
     Erich:[-12.5,-6.5,4,-9,-15]
   };
   var games = g26.map(function (g) {
-    return { id: g[0], date: g[1], year: 2026, location: g[2], buyin: buyin, chips: chips, pot: '', note: '' };
+    return { id: g[0], date: g[1], year: 2026, location: g[2], buyin: buyin, chips: chips,
+             pot: '', note: '', status: 'done', startedAt: '', endedAt: '' };
   });
   var results = [];
   Object.keys(r26).forEach(function (p) {
@@ -79,10 +80,38 @@ window.MPA_SAMPLE = (function () {
     });
   });
 
+  // Beispiel-Log für einen abgeschlossenen Abend (G5, 22.08.2026 bei Wolf)
+  var log = [
+    { gameId:'G5', ts:'2026-08-22T20:05:00', type:'start', player:'', info:'Abend gestartet' },
+    { gameId:'G5', ts:'2026-08-22T20:05:00', type:'buyin', player:'Wolf', info:'' },
+    { gameId:'G5', ts:'2026-08-22T20:05:00', type:'buyin', player:'Bruno', info:'' },
+    { gameId:'G5', ts:'2026-08-22T20:05:00', type:'buyin', player:'Heuschi', info:'' },
+    { gameId:'G5', ts:'2026-08-22T20:05:00', type:'buyin', player:'Raphi', info:'' },
+    { gameId:'G5', ts:'2026-08-22T20:05:00', type:'buyin', player:'Greg', info:'' },
+    { gameId:'G5', ts:'2026-08-22T20:05:00', type:'buyin', player:'Michi', info:'' },
+    { gameId:'G5', ts:'2026-08-22T20:05:00', type:'buyin', player:'Patrick', info:'' },
+    { gameId:'G5', ts:'2026-08-22T20:05:00', type:'buyin', player:'Erich', info:'' },
+    { gameId:'G5', ts:'2026-08-22T21:12:00', type:'rebuy', player:'Erich', info:'' },
+    { gameId:'G5', ts:'2026-08-22T21:48:00', type:'rebuy', player:'Greg', info:'' },
+    { gameId:'G5', ts:'2026-08-22T22:30:00', type:'rebuy', player:'Erich', info:'' },
+    { gameId:'G5', ts:'2026-08-22T23:55:00', type:'end', player:'', info:'Abend beendet' }
+  ];
+
+  // Ein laufender Live-Abend (heute) – noch ohne Endergebnis
+  var lg = ['G6', '2026-09-05', 'Bruno'];
+  games.push({ id: lg[0], date: lg[1], year: 2026, location: lg[2], buyin: buyin, chips: chips,
+               pot: '', note: '', status: 'live', startedAt: '2026-09-05T20:10:00', endedAt: '' });
+  [['Bruno','20:10'],['Patrick','20:10'],['Wolf','20:10'],['Michi','20:10'],['Raphi','20:10']].forEach(function (p) {
+    log.push({ gameId:'G6', ts:'2026-09-05T'+p[1]+':00', type:'buyin', player:p[0], info:'' });
+  });
+  log.unshift({ gameId:'G6', ts:'2026-09-05T20:10:00', type:'start', player:'', info:'Abend gestartet' });
+  log.push({ gameId:'G6', ts:'2026-09-05T21:05:00', type:'rebuy', player:'Patrick', info:'' });
+  log.push({ gameId:'G6', ts:'2026-09-05T21:40:00', type:'rebuy', player:'Michi', info:'' });
+
   return {
     ok: true, updated: new Date().toISOString(), currentYear: 2026,
     defaultBuyin: buyin, defaultChips: chips,
     games: games, results: results, legacyTotals: legacyTotals,
-    champions: champions, players: players, _demo: true
+    champions: champions, players: players, log: log, _demo: true
   };
 })();

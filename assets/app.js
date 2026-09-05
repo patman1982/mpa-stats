@@ -1,7 +1,8 @@
 /* MPA – öffentliche Statistik-Seite. Holt Daten, rechnet (stats.js), rendert. */
 (function () {
   'use strict';
-  var eur = MPA.eur, shortDate = MPA.shortDate, fmtDate = MPA.fmtDate;
+  var eur = MPA.eur, shortDate = MPA.shortDate, fmtDate = MPA.fmtDate,
+      fmtTime = MPA.fmtTime, fmtDuration = MPA.fmtDuration;
   var cfg = window.MPA_CONFIG || {};
   var app = document.getElementById('app');
   var state = { data: null, S: null, viewYear: null, chartOff: {} };
@@ -29,6 +30,18 @@
   }
   function useSample(msg){ state.demoMsg = msg; render(window.MPA_SAMPLE); }
 
+  // Hash-Routing: #game/<id> -> öffentliche Detailansicht, sonst Dashboard
+  function gameIdFromHash(){
+    var m = String(location.hash || '').match(/^#game\/(.+)$/);
+    return m ? decodeURIComponent(m[1]) : null;
+  }
+  window.addEventListener('hashchange', function(){ if(state.S) route(); });
+  function route(){
+    var id = gameIdFromHash();
+    if (id) renderDetail(id);
+    else renderDashboard();
+  }
+
   function setHeader(){
     document.getElementById('brandTitle').textContent = cfg.TITLE || 'MPA';
     if (cfg.SUBTITLE) document.getElementById('brandSub').textContent = cfg.SUBTITLE;
@@ -40,9 +53,15 @@
   function render(data){
     state.data = data;
     state.S = MPA.compute(data);
-    state.viewYear = state.S.currentYear;
+    if (state.viewYear == null) state.viewYear = state.S.currentYear;
+    route();
+  }
+
+  function renderDashboard(){
+    var data = state.data;
     var html = '';
     if (data._demo) html += demoBanner(state.demoMsg);
+    html += liveBanner();
     html += hero();
     html += kpis();
     html += yearSwitcher();
@@ -57,11 +76,114 @@
     app.innerHTML = html;
     renderYearView();
     bindYearSwitcher();
+    window.scrollTo(0, 0);
+  }
+
+  // Banner, wenn gerade ein Abend live läuft
+  function liveBanner(){
+    var live = (state.S.liveGames || []);
+    if(!live.length) return '';
+    return live.map(function(g){
+      return '<a class="livebanner" href="#game/'+encodeURIComponent(g.id)+'">'
+        + '<span class="livedot"></span> <b>Live-Abend läuft</b>'
+        + ' · '+fmtDate(g.date)+(g.location?' · '+esc(g.location):'')
+        + ' <span class="go">ansehen →</span></a>';
+    }).join('');
   }
 
   function demoBanner(msg){
     return '<div class="state"><div class="errbox" style="background:rgba(231,193,76,.12);border-color:var(--gold);color:#f6e6ad">'
       + '🔧 '+esc(msg||'Vorschaumodus')+'</div></div>';
+  }
+
+  // ---- Öffentliche Abend-Detailansicht (#game/<id>) ------------------------
+  function renderDetail(id){
+    var d = state.S.gameDetail(id);
+    if(!d){
+      app.innerHTML = '<div class="state"><div class="errbox">Abend nicht gefunden.</div>'
+        + '<p style="margin-top:14px"><a href="#">← zurück zur Statistik</a></p></div>';
+      window.scrollTo(0,0); return;
+    }
+    var g = d.game, live = g.status === 'live';
+    var chipVal = g.chips ? g.buyin/g.chips : 0;
+
+    // Kopf
+    var dur = g.startedAt ? fmtDuration(g.startedAt, live ? null : g.endedAt) : '';
+    var head = '<div class="detailhead">'
+      + '<a class="back" href="#">← Statistik</a>'
+      + '<h1 class="dtitle">'+fmtDate(g.date)+(live?' <span class="badge live-badge"><span class="livedot"></span>live</span>':'')+'</h1>'
+      + '<div class="dmeta">'
+      +   (g.location?'<span>🏠 '+esc(g.location)+'</span>':'')
+      +   '<span>👥 '+d.players.length+' Spieler</span>'
+      +   (d.rebuys?'<span>🔁 '+d.rebuys+' Rebuys</span>':'')
+      +   (g.startedAt?'<span>🕒 '+fmtTime(g.startedAt)+(g.endedAt?'–'+fmtTime(g.endedAt):'')+(dur?' ('+dur+')':'')+'</span>':'')
+      +   '<span>💶 Buy-In '+eur(g.buyin)+' / '+Number(g.chips).toLocaleString('de-DE')+' Chips</span>'
+      + '</div>'
+      + (g.note?'<div class="dnote">📝 '+esc(g.note)+'</div>':'')
+      + '</div>';
+
+    // Ergebnis-Tabelle
+    var table;
+    if (d.results.length){
+      var rows = d.results.map(function(r,i){
+        var medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':'';
+        return '<tr class="'+(i===0?'top1':'')+'">'
+          + '<td class="rank">'+(medal||(i+1))+'</td>'
+          + '<td class="name"><span class="pname">'+esc(r.player)+'</span></td>'
+          + '<td class="mini">'+(r.buyIns!=null?r.buyIns+'×':'–')+'</td>'
+          + '<td class="mini hide-sm">'+(r.finalChips!=null?Number(r.finalChips).toLocaleString('de-DE'):'–')+'</td>'
+          + '<td class="'+cls(r.result)+'"><b>'+signEur(r.result)+'</b></td>'
+          + '</tr>';
+      }).join('');
+      table = '<div class="card"><h2><span class="h-emoji">📊</span> Ergebnis</h2>'
+        + '<div class="body"><table class="lb"><thead><tr>'
+        + '<th class="rank">#</th><th class="name">Spieler</th><th>Buy-Ins</th>'
+        + '<th class="hide-sm">End-Chips</th><th>Ergebnis</th>'
+        + '</tr></thead><tbody>'+rows+'</tbody></table>'
+        + '<div class="dpot mini">Pot: '+eur(d.pot)+'</div></div></div>';
+    } else {
+      // Live: noch keine Endergebnisse -> aktuelle Buy-Ins zeigen
+      var cs = d.buyinCounts;
+      var prs = Object.keys(cs).sort(function(a,b){ return cs[b]-cs[a]; }).map(function(p){
+        return '<tr><td class="name"><span class="pname">'+esc(p)+'</span></td>'
+          + '<td>'+cs[p]+'×</td><td class="mini">'+eur(cs[p]*g.buyin)+'</td></tr>';
+      }).join('');
+      table = '<div class="card"><h2><span class="h-emoji">🎲</span> Läuft gerade</h2>'
+        + '<div class="body"><p class="mini" style="padding:0 8px 8px">Endergebnis wird nach Abschluss angezeigt. Bisherige Buy-Ins:</p>'
+        + '<table class="lb"><thead><tr><th class="name">Spieler</th><th>Buy-Ins</th><th class="mini">Einsatz</th></tr></thead>'
+        + '<tbody>'+prs+'</tbody></table>'
+        + '<div class="dpot mini">Pot bisher: '+eur(d.pot)+'</div></div></div>';
+    }
+
+    // Log / Verlauf
+    var timeline = logTimeline(d.log);
+
+    // Admin-Aktionen (Bearbeiten braucht Passwort -> in admin.html)
+    var admin = '<div class="detailactions">'
+      + (live
+          ? '<a class="btn" href="admin.html#live/'+encodeURIComponent(g.id)+'">▶ Live weiterführen (Admin)</a>'
+          : '<a class="btn sec" href="admin.html#edit/'+encodeURIComponent(g.id)+'">✏️ Bearbeiten (Admin)</a>')
+      + '</div>';
+
+    app.innerHTML = '<section class="detail">'+head+table+timeline+admin+'</section>';
+    window.scrollTo(0,0);
+  }
+
+  function logTimeline(log){
+    if(!log || !log.length)
+      return '<div class="card"><h2><span class="h-emoji">📜</span> Verlauf</h2>'
+        + '<div class="body"><p class="state">Für diesen Abend wurde kein Live-Log geführt.</p></div></div>';
+    var items = log.map(function(e){
+      var icon, txt;
+      if(e.type==='start'){ icon='🟢'; txt='<b>Abend gestartet</b>'; }
+      else if(e.type==='end'){ icon='🔴'; txt='<b>Abend beendet</b>'; }
+      else if(e.type==='buyin'){ icon='🪙'; txt=esc(e.player)+' <span class="mini">Buy-In</span>'; }
+      else if(e.type==='rebuy'){ icon='🔁'; txt=esc(e.player)+' <span class="mini">Rebuy</span>'; }
+      else { icon='📝'; txt=(e.player?esc(e.player)+' · ':'')+esc(e.info||''); }
+      return '<li><span class="lt">'+fmtTime(e.ts)+'</span><span class="li-ic">'+icon+'</span><span class="lx">'+txt+'</span></li>';
+    }).join('');
+    return '<div class="card"><h2><span class="h-emoji">📜</span> Verlauf</h2>'
+      + '<div class="body"><ul class="timeline">'+items+'</ul></div></div>';
   }
 
   function hero(){
@@ -110,6 +232,7 @@
     var html = leaderboardCard(y, lb);
     if (prog.dates.length) html += chartCard(y, prog);
     else html += '<div class="card"><div class="body"><p class="state">Für '+y+' liegen keine Abend-Details vor – nur die Jahres-Summe (die Runde hatte damals noch keine Detailerfassung). Bilanz siehe Tabelle oben.</p></div></div>';
+    html += nightsListCard(y);
     document.getElementById('yearView').innerHTML = html;
     if (prog.dates.length) drawChart(prog);
   }
@@ -133,6 +256,29 @@
       + '<th class="rank">#</th><th class="name">Spieler</th><th>Bilanz</th>'
       + '<th class="hide-sm">Abende</th><th class="hide-sm">Ø</th><th class="hide-sm">Quote</th>'
       + '</tr></thead><tbody>'+rows+'</tbody></table></div></div></section>';
+  }
+
+  // Klickbare Liste aller Abende eines Jahres -> Detailansicht
+  function nightsListCard(year){
+    var list = state.S.gamesList().filter(function(g){ return g.year === year; });
+    if(!list.length) return '';
+    var rows = list.map(function(g){
+      var live = g.status === 'live';
+      var meta = g.players + (g.players===1?' Spieler':' Spieler')
+        + (g.rebuys?' · '+g.rebuys+' Rebuys':'');
+      var right = live
+        ? '<span class="badge live-badge"><span class="livedot"></span>live</span>'
+        : (g.top ? '<span class="mini">🥇 '+esc(g.top.player)+' '+signEur(g.top.result)+'</span>' : '');
+      return '<a class="nightrow" href="#game/'+encodeURIComponent(g.id)+'">'
+        + '<span class="nd">'+fmtDate(g.date)+'</span>'
+        + '<span class="nl">'+(g.location?'🏠 '+esc(g.location):'<span class="mini">—</span>')+'</span>'
+        + '<span class="nm mini">'+meta+'</span>'
+        + '<span class="nr">'+right+'</span>'
+        + '<span class="chev">›</span>'
+        + '</a>';
+    }).join('');
+    return '<section><div class="card"><h2><span class="h-emoji">🗓️</span> Abende '+year+'</h2>'
+      + '<div class="body nightlist">'+rows+'</div></div></section>';
   }
 
   function chartCard(year, prog){
