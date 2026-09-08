@@ -832,6 +832,10 @@ function monthFromLabel_(s) {
 /** Zellwert -> "YYYY-MM-DD", wenn es ein Datum (Date-Zelle oder "d.m.[yyyy]"-Text) ist; sonst null. */
 function cellToIso_(cell, year) {
   if (cell instanceof Date && !isNaN(cell.getTime())) {
+    // Kaputte Datumszellen (z.B. Jahr 0206 statt 2026) auf das Tab-Jahr korrigieren.
+    if (cell.getFullYear() < 2010) {
+      return year + '-' + pad2_(cell.getMonth() + 1) + '-' + pad2_(cell.getDate());
+    }
     return Utilities.formatDate(cell, Session.getScriptTimeZone(), 'yyyy-MM-dd');
   }
   var m = String(cell).match(/^\s*(\d{1,2})\.(\d{1,2})\.?(\d{2,4})?\s*$/);
