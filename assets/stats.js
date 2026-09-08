@@ -477,10 +477,13 @@
 
   // ---- Daten laden: fetch, bei CORS-Problemen JSONP-Fallback --------------
   function loadData(url, onOk, onErr) {
-    var done = false;
-    function ok(d){ if(!done){ done = true; onOk(d); } }
+    var done = false, jsonpStarted = false;
+    function ok(d){ if(!done){ done = true; clearTimeout(fetchTimer); onOk(d); } }
     function err(e){ if(!done){ done = true; onErr(e); } }
-    // 1) fetch
+    // 1) fetch – kann bei Cross-Origin zu Apps Script (GitHub Pages) hängen,
+    //    ohne je zu erfüllen ODER abzulehnen. Deshalb zusätzlich ein Timeout,
+    //    der verlässlich auf JSONP umschaltet.
+    var fetchTimer = setTimeout(function(){ jsonp(); }, 3500);
     try {
       fetch(url, { method:'GET' })
         .then(function(r){ return r.json(); })
@@ -489,7 +492,9 @@
     } catch(e){ jsonp(); }
     // 2) JSONP-Fallback (funktioniert für Apps Script "Jeder"-Web-Apps immer)
     function jsonp(){
-      if(done) return;
+      if(done || jsonpStarted) return;
+      jsonpStarted = true;
+      clearTimeout(fetchTimer);
       var cb = 'mpa_cb_' + Math.floor(Math.random()*1e9);
       var s = document.createElement('script');
       var t = setTimeout(function(){ cleanup(); err(new Error('Zeitüberschreitung')); }, 12000);

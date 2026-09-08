@@ -39,17 +39,31 @@
     clearTimeout(toastTimer); toastTimer=setTimeout(function(){ el.remove(); }, err?4200:2600);
   }
 
-  // POST an Apps Script (mit Passwort). cb(data) bei Erfolg, cb(null) bei Fehler.
+  // Schreib-POST an Apps Script (mit Passwort). cb(data) bei Erfolg, cb(null,err) bei Fehler.
+  // Cross-Origin ist die ANTWORT oft nicht lesbar (bzw. der fetch hängt in manchen
+  // In-App-Browsern), obwohl der Schreibvorgang serverseitig ausgeführt wird. Deshalb:
+  // bei Lesefehler/Timeout die Daten per JSONP neu laden und den tatsächlichen Stand
+  // anzeigen – OHNE erneut zu senden (keine Doppel-Buchung von Rebuys). cb bekommt dann
+  // { ok:true, reloaded:true } statt der Server-Antwort.
   function post(payload, cb){
     if(DEMO){ toast('Vorschaumodus – ohne API-URL wird nichts gespeichert.', true); return; }
     var password = getPw();
     if(!password){ toast('Bitte Admin-Passwort eingeben.', true); return; }
     payload.password = password;
-    fetch(API, { method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
-        body: JSON.stringify(payload) })
-      .then(function(r){ return r.json(); })
-      .then(function(d){ if(!d || !d.ok){ toast((d&&d.error)||'Fehler beim Speichern.', true); cb&&cb(null,d); } else cb&&cb(d); })
-      .catch(function(e){ toast('Netzwerkfehler: '+e.message, true); cb&&cb(null); });
+    var settled = false;
+    function settle(d, errData){ if(settled) return; settled = true; clearTimeout(timer); cb && cb(d, errData); }
+    function fallback(){ if(settled) return; loadAll(function(){ settle({ ok:true, reloaded:true }); }); }
+    var timer = setTimeout(fallback, 6000);
+    try {
+      fetch(API, { method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
+          body: JSON.stringify(payload) })
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          if(!d || !d.ok){ toast((d&&d.error)||'Fehler beim Speichern.', true); settle(null, d); }
+          else settle(d);
+        })
+        .catch(function(){ fallback(); }); // Antwort nicht lesbar -> Schreibvorgang ging meist durch
+    } catch(e){ fallback(); }
   }
 
   function pwField(){
@@ -271,8 +285,14 @@
       post({ action:'startGame', game:game, players:start }, function(d){
         btn.disabled=false; btn.textContent='▶ Abend jetzt starten';
         if(!d) return;
-        live = { id:d.id, game:game, log:d.log||[] };
-        loadAll(function(){ go('#live/'+encodeURIComponent(d.id)); route(); });
+        var newId = d.id;
+        if(!newId){ // reloaded: jüngsten Live-Abend als den gerade gestarteten nehmen
+          var lives = (S.liveGames||[]).slice().sort(function(a,b){ return String(a.startedAt) < String(b.startedAt) ? 1 : -1; });
+          if(lives[0]) newId = lives[0].id;
+        }
+        if(!newId){ toast('Abend gestartet – bitte in der Übersicht öffnen.'); go('#'); return; }
+        live = { id:newId, game:game, log:d.log||[] };
+        loadAll(function(){ go('#live/'+encodeURIComponent(newId)); route(); });
       });
     });
   }
@@ -338,15 +358,16 @@
       }).join('')+'</ul>';
     }
     function tickClock(){ var el=document.getElementById('liveClock'); if(el) el.textContent='läuft '+fmtDuration(meta.startedAt,null); }
+    function syncLog(d){ if(d && d.log) live.log=d.log; else { var g2=S.gameDetail(id); if(g2) live.log=g2.log.slice(); } }
     function doBuy(player,type){
       post({ action:'logBuy', id:id, player:player, type:type }, function(d){
-        if(!d) return; live.log=d.log||live.log; renderChips(); renderMiniLog();
-        toast((type==='rebuy'?'Rebuy':'Buy-In')+' für '+player+' geloggt ('+fmtTime(new Date().toISOString())+').');
+        if(!d) return; syncLog(d); renderChips(); renderMiniLog();
+        toast((type==='rebuy'?'Rebuy':'Buy-In')+' für '+player+' geloggt.');
       });
     }
     function doUndo(player){
       post({ action:'undoBuy', id:id, player:player }, function(d){
-        if(!d) return; live.log=d.log||live.log; renderChips(); renderMiniLog(); toast('Zurückgenommen: '+player);
+        if(!d) return; syncLog(d); renderChips(); renderMiniLog(); toast('Zurückgenommen: '+player);
       });
     }
   }
@@ -382,8 +403,9 @@
       post({ action:'finishGame', id:id, game:{ buyin:num('buyin',meta.buyin), chips:num('chips',meta.chips) }, results:results }, function(d){
         btn.disabled=false; btn.textContent='✅ Abschließen & speichern';
         if(!d) return; live=null;
-        var bal = Math.abs(Number(d.balance||0))<0.01?'':' (Bilanz-Differenz '+eur(d.balance)+')';
-        toast('✓ Abend abgeschlossen: '+d.saved+' Spieler'+bal+'.');
+        if(d.reloaded){ toast('✓ Abend abgeschlossen.'); }
+        else { var bal = Math.abs(Number(d.balance||0))<0.01?'':' (Bilanz-Differenz '+eur(d.balance)+')';
+               toast('✓ Abend abgeschlossen: '+d.saved+' Spieler'+bal+'.'); }
         setTimeout(function(){ location.href='index.html#game/'+encodeURIComponent(id); }, 1200);
       });
     });
@@ -414,8 +436,9 @@
       post({ action:'editGame', id:id, game:game, results:results }, function(d){
         btn.disabled=false; btn.textContent='💾 Änderungen speichern';
         if(!d) return;
-        var bal=Math.abs(Number(d.balance||0))<0.01?'':' (Bilanz-Differenz '+eur(d.balance)+')';
-        toast('✓ Gespeichert'+bal+'.');
+        if(d.reloaded){ toast('✓ Gespeichert.'); }
+        else { var bal=Math.abs(Number(d.balance||0))<0.01?'':' (Bilanz-Differenz '+eur(d.balance)+')';
+               toast('✓ Gespeichert'+bal+'.'); }
         setTimeout(function(){ location.href='index.html#game/'+encodeURIComponent(id); }, 1200);
       });
     });
@@ -446,6 +469,7 @@
   }
   function backlink(title){ return '<div class="crumb"><a href="#">← Übersicht</a><span class="ctitle">'+esc(title)+'</span></div>'; }
   function afterSave(d){
+    if(d.reloaded || !d.id){ toast('✓ Gespeichert.'); setTimeout(function(){ go('#'); route(); }, 1200); return; }
     var bal=Math.abs(Number(d.balance||0))<0.01?'':' (Bilanz-Differenz '+eur(d.balance)+')';
     toast('✓ Gespeichert: '+d.saved+' Spieler'+bal+'.');
     setTimeout(function(){ location.href='index.html#game/'+encodeURIComponent(d.id); }, 1200);
