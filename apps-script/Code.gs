@@ -538,15 +538,15 @@ function migrate() {
     champs = parseChampions_(av, currentYear);
   }
 
-  // ---- 2) Abend-Details je Jahres-Tab --------------------------------------
+  // ---- 2) Abend-Details je Jahres-Tab (ALLE Jahre) -------------------------
+  // Nur die "<Jahr>_stäts"-Tabs (nicht die _bilanz-/calc-Tabs).
   var games = [], results = [];
   old.getSheets().forEach(function (sh) {
     var nm = sh.getName();
+    if (!/stäts/i.test(nm)) return;
     var ym = nm.match(/(20\d\d)/);
     if (!ym) return;
-    var yr = Number(ym[1]);
-    if (yr < 2023) return; // vor 2023: nur Summen (alte Tabs fehlerbehaftet)
-    parseYearSheet_(sh, yr, games, results);
+    parseYearSheet_(sh, Number(ym[1]), games, results);
   });
 
   // ---- 3) Schreiben ---------------------------------------------------------
@@ -566,68 +566,129 @@ function migrate() {
     champs.length + ' Rekorde.');
 }
 
-/** Parst einen Jahres-Tab (Format ab 2023): Rank|Player|Ttl|Da|Start|Datum…| */
+/**
+ * Parst einen Jahres-Tab. Die alten Tabs haben ZWEI Formate:
+ *   - "Delta"      (2022–2026): Einzelergebnisse pro Abend. Kopf enthält Start + Ttl,
+ *                  Datumsspalten sind echte Datumszellen oder "d.m."-Texte.
+ *   - "Kumulativ"  (2018–2021): laufende Gesamtstände. Kopf enthält "MPAs". Einzelabend
+ *                  = Differenz zweier aufeinanderfolgender Spalten; ±0 = nicht dabei.
+ * Spielernamen werden auf die kanonische Schreibweise normalisiert (normName_).
+ */
 function parseYearSheet_(sh, year, games, results) {
   var v = sh.getDataRange().getValues();
-  // Kopfzeile finden: Spalte0 == "Rank", enthält "Ttl" und "Start"
+  var isDelta = false;
+  for (var r = 0; r < v.length; r++) {
+    var row = v[r].map(function (x){ return String(x).trim(); });
+    if (row.indexOf('Start') >= 0 && row.indexOf('Ttl') >= 0) { isDelta = true; break; }
+  }
+  if (isDelta) parseDeltaSheet_(v, year, games, results);
+  else         parseCumulSheet_(v, year, games, results);
+}
+
+/** Format mit Einzelergebnissen (2022–2026). */
+function parseDeltaSheet_(v, year, games, results) {
   var hRow = -1;
   for (var r = 0; r < v.length; r++) {
     var row = v[r].map(function (x){ return String(x).trim(); });
-    if (row[0] === 'Rank' && row.indexOf('Start') >= 0 && row.indexOf('Ttl') >= 0) { hRow = r; break; }
+    if (row.indexOf('Start') >= 0 && row.indexOf('Ttl') >= 0) { hRow = r; break; }
   }
   if (hRow < 0) return;
-  var startCol = v[hRow].map(String).indexOf('Start');
-  var dateStart = startCol + 1;
-  // Datums-Spalten (zusammenhängend ab dateStart, solange Kopf nicht leer).
-  // raw = Original-Zellwert (oft ein echtes Date-Objekt), label = Text-Fallback.
-  var dates = [];
-  for (var c = dateStart; c < v[hRow].length; c++) {
-    var raw = v[hRow][c];
-    var d = String(raw).trim();
-    if (d === '') break;
-    dates.push({ col: c, raw: raw, label: d });
+  var H = v[hRow].map(function (x){ return String(x).trim(); });
+  var startCol = H.indexOf('Start');
+  var playerCol = -1;
+  ['Spielaz', 'Spieler', 'Player'].forEach(function (k) { if (playerCol < 0 && H.indexOf(k) >= 0) playerCol = H.indexOf(k); });
+  if (playerCol < 0) playerCol = 1;
+
+  var dateCols = [];
+  for (var c = startCol + 1; c < v[hRow].length; c++) {
+    var iso = cellToIso_(v[hRow][c], year);
+    if (iso) dateCols.push({ col: c, iso: iso });
   }
-  // Location-Zeile suchen (oberhalb der Kopfzeile: Zelle == "Location")
   var locRow = -1;
   for (var lr = Math.max(0, hRow - 5); lr < hRow; lr++) {
-    if (v[lr].map(function(x){return String(x).trim();}).indexOf('Location') >= 0) locRow = lr;
+    var has = false;
+    v[lr].forEach(function (x){ if (String(x).trim().toLowerCase().indexOf('location') === 0) has = true; });
+    if (has) locRow = lr;
   }
-  // Spiele anlegen (ein Spiel je Datum, das echte Ergebnisse hat)
-  var gameId = {};
-  dates.forEach(function (dc) {
-    var loc = locRow >= 0 ? String(v[locRow][dc.col] || '').trim() : '';
-    var iso = fullDate_(dc.raw, year);
-    var id = 'H' + year + '_' + iso.replace(/-/g, '');
-    gameId[dc.col] = { id: id, date: iso, location: loc };
+  var gid = {};
+  dateCols.forEach(function (dc) {
+    var loc = (locRow >= 0 && v[locRow][dc.col] != null) ? String(v[locRow][dc.col]).trim() : '';
+    gid[dc.col] = { id: 'H' + year + '_' + dc.iso.replace(/-/g, ''), iso: dc.iso, loc: loc };
   });
-  // Spieler-Zeilen: ab hRow+1, solange Spalte0 Zahl (Rank) und Spalte1 Name
+
+  var startLen = results.length;
   for (var dr = hRow + 1; dr < v.length; dr++) {
-    var rank = v[dr][0];
-    var player = String(v[dr][1]).trim();
-    if (player === '' || !isFinite(Number(rank)) || String(rank).trim() === '') {
-      // Ende des Blocks, wenn zwei leere Zeilen o. "Ttl plays"
-      if (String(v[dr][1]).indexOf('Ttl plays') >= 0) break;
-      if (player === '' && String(v[dr][0]).trim() === '') break;
-      continue;
-    }
-    dates.forEach(function (dc) {
-      var val = parseNum_(v[dr][dc.col]);
-      if (val === null) return;
-      // leere Teilnahme (0 an Datum, an dem Spieler nicht spielte) rausfiltern:
-      // im Original bedeutet leere Zelle "nicht dabei", 0 = dabei mit +/-0.
-      var raw = v[dr][dc.col];
-      if (raw === '' || raw === null) return;
-      var gi = gameId[dc.col];
-      results.push([gi.id, player, '', '', '', round2_(val)]);
+    var raw = v[dr][playerCol];
+    if (raw == null) continue;
+    var s = String(raw).trim(), low = s.toLowerCase();
+    if (low === 'ttl plays' || low === 'kontrolle' || low === 'runde') break;
+    if (s === '' || isSkipName_(low)) continue;
+    var name = normName_(s);
+    dateCols.forEach(function (dc) {
+      var val = v[dr][dc.col];
+      if (typeof val === 'number' && isFinite(val)) {
+        results.push([gid[dc.col].id, name, '', '', '', round2_(val)]);
+      }
     });
   }
-  // Nur Spiele mit mind. 1 Ergebnis übernehmen
+  addUsedGames_(results, startLen, dateCols.map(function (dc){ return { id: gid[dc.col].id, iso: gid[dc.col].iso, loc: gid[dc.col].loc }; }), year, games);
+}
+
+/** Format mit kumulierten Gesamtständen (2018–2021). */
+function parseCumulSheet_(v, year, games, results) {
+  var hRow = -1;
+  for (var r = 0; r < v.length; r++) {
+    if (v[r].map(function (x){ return String(x).trim(); }).indexOf('MPAs') >= 0) { hRow = r; break; }
+  }
+  if (hRow < 0) return;
+  var H = v[hRow];
+  var playerCol = H.map(function (x){ return String(x).trim(); }).indexOf('MPAs');
+  var valueCols = [];
+  for (var c = playerCol + 1; c < H.length; c++) {
+    if (H[c] != null && String(H[c]).trim() !== '') valueCols.push(c);
+  }
+  // Datum je Spalte: echtes Datum / "d.m."-Text, sonst aus Monatsnamen schätzen
+  var lastM = 0, mc = {}, colIso = {};
+  valueCols.forEach(function (c) {
+    var iso = cellToIso_(H[c], year);
+    if (iso) { colIso[c] = iso; lastM = Number(iso.slice(5, 7)); }
+    else {
+      var mo = monthFromLabel_(String(H[c])) || lastM || 1; lastM = mo;
+      mc[mo] = (mc[mo] || 0) + 1;
+      colIso[c] = year + '-' + pad2_(mo) + '-' + pad2_(Math.min(1 + mc[mo] * 3, 28));
+    }
+  });
+  var gidByCol = {}, order = [];
+  valueCols.forEach(function (c, gi) {
+    var id = 'H' + year + '_' + pad2_(gi + 1);
+    gidByCol[c] = id;
+    order.push({ id: id, iso: colIso[c], loc: '' });
+  });
+
+  var startLen = results.length;
+  for (var dr = hRow + 1; dr < v.length; dr++) {
+    var raw = v[dr][playerCol];
+    if (raw == null) continue;
+    var s = String(raw).trim(), low = s.toLowerCase();
+    if (low === 'kontrolle' || low === 'runde') break;
+    if (s === '' || isSkipName_(low)) continue;
+    var name = normName_(s), prev = 0;
+    valueCols.forEach(function (c) {
+      var val = v[dr][c];
+      if (val == null || typeof val !== 'number' || !isFinite(val)) return;
+      var delta = round2_(val - prev); prev = val;
+      if (Math.abs(delta) >= 0.01) results.push([gidByCol[c], name, '', '', '', delta]);
+    });
+  }
+  addUsedGames_(results, startLen, order, year, games);
+}
+
+/** Fügt nur die Spiele hinzu, die (in diesem Aufruf) mind. 1 Ergebnis bekamen. */
+function addUsedGames_(results, startLen, order, year, games) {
   var used = {};
-  results.forEach(function (row) { used[row[0]] = true; });
-  dates.forEach(function (dc) {
-    var gi = gameId[dc.col];
-    if (!used[gi.id]) return;
-    games.push([gi.id, gi.date, year, gi.location, '', '', '', '', '']);
+  for (var i = startLen; i < results.length; i++) used[results[i][0]] = true;
+  order.forEach(function (g) {
+    if (used[g.id]) games.push([g.id, g.iso, year, g.loc, '', '', '', '', '']);
   });
 }
 
@@ -738,6 +799,46 @@ function parseNum_(v) {
 }
 
 function round2_(n) { return Math.round(Number(n) * 100) / 100; }
+function pad2_(n) { return ('0' + n).slice(-2); }
+
+// ---- Migration: Namens- & Datums-Helfer ------------------------------------
+
+// Schreibvarianten aus den alten Jahres-Tabs -> kanonischer Name (wie im alltime-Tab)
+var NAME_ALIASES_ = { 'alex': 'Alex S', 'alex s.': 'Alex S', 'gregor': 'Greg', 'marianne': 'Mariane' };
+function normName_(s) {
+  s = String(s).trim();
+  return NAME_ALIASES_[s.toLowerCase()] || s;
+}
+
+// Zeilen-Labels, die keine Spieler sind
+var SKIP_NAMES_ = {
+  'kontrolle':1,'runde':1,'statistikopfer':1,'fehler':1,'ttl plays':1,'totals':1,'total':1,
+  'ttl':1,'spielaz':1,'spieler':1,'player':1,'mpas':1,'location':1,'location:':1,'date:':1,
+  'order':1,'rank':1,'ranking':1,'show ups':1,'starting point':1,'-':1,'dead':1
+};
+function isSkipName_(low) { return !!SKIP_NAMES_[low]; }
+
+// Monatsnamen/Feiertage aus alten Kopfzeilen -> Monatszahl (für 2018–2020)
+var MONTHS_ = { 'jän':1,'jan':1,'feb':2,'mär':3,'apr':4,'mai':5,'jun':6,'jul':7,'aug':8,
+                'sep':9,'spc':9,'okt':10,'nov':11,'dez':12,'ostern':4,'himmelf':5,
+                'jubiläum':6,'open air':7,'weihnacht':12,'acs':12 };
+function monthFromLabel_(s) {
+  s = String(s).toLowerCase();
+  for (var k in MONTHS_) if (s.indexOf(k) >= 0) return MONTHS_[k];
+  if (s.indexOf('arbeit') >= 0) return 5; // "T.d. Arbeit"
+  return 0;
+}
+
+/** Zellwert -> "YYYY-MM-DD", wenn es ein Datum (Date-Zelle oder "d.m.[yyyy]"-Text) ist; sonst null. */
+function cellToIso_(cell, year) {
+  if (cell instanceof Date && !isNaN(cell.getTime())) {
+    return Utilities.formatDate(cell, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+  var m = String(cell).match(/^\s*(\d{1,2})\.(\d{1,2})\.?(\d{2,4})?\s*$/);
+  if (!m) return null;
+  var y = m[3] ? (m[3].length === 2 ? '20' + m[3] : m[3]) : String(year);
+  return y + '-' + pad2_(m[2]) + '-' + pad2_(m[1]);
+}
 
 function yearOf_(dateStr) {
   var m = String(dateStr).match(/(20\d\d)/);

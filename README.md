@@ -40,7 +40,11 @@ Kurz: **Die Zahlen kommen aus dem Sheet und aktualisieren sich von allein.** Git
 6. Funktion **`migrate`** auswählen und **Ausführen**. → Holt die Historie aus dem alten Sheet:
    - Jahres-Summen 2018–2025 + Stammspieler-Markierung aus dem Tab `alltime`
    - Rekord-/Sieger-Block (Hall of Fame)
-   - Abend-Details 2023–2026 aus den Jahres-Tabs
+   - **Einzelabende aller Jahre 2018–2026** aus den `<Jahr>_stäts`-Tabs. Die alten Tabs
+     haben zwei Formate: 2022–2026 mit Einzelergebnissen, 2018–2021 als kumulierte
+     Gesamtstände (daraus werden die Einzelabende zurückgerechnet – vor 2021
+     näherungsweise). Spielernamen werden auf die kanonische Schreibweise normalisiert.
+     Die offiziellen **Jahres-Bilanzen** bleiben in jedem Fall die exakten `alltime`-Werte.
    > Die ID des alten Sheets steht in `Code.gs` oben (`OLD_SHEET_ID`). Sie ist bereits eingetragen.
 7. **Als Web-App bereitstellen:** oben rechts **Bereitstellen → Neue Bereitstellung → Typ „Web-App"**:
    - Beschreibung: beliebig
